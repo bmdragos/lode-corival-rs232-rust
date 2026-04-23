@@ -1,8 +1,9 @@
 //! Lode FTMS Bridge firmware for ESP32-C6.
 //!
 //! Main task wires together:
-//! - `bike_serial::BikeSerial`  - RS-232 driver on UART1
-//! - `ble_server::BleServer`    - NimBLE FTMS peripheral
+//! - `bike_serial::BikeSerial`   - RS-232 driver on UART1
+//! - `ble_server::BleServer`     - NimBLE FTMS peripheral
+//! - `status_led::StatusLed`     - GPIO15 user LED
 //! - `lode_protocol::state_machine` - pure transition helpers
 //!
 //! The BLE callback thread pushes target-power requests into a shared
@@ -10,9 +11,15 @@
 //! and confirms back via FTMS Status notifications. Poll outcomes feed
 //! `on_poll_result` to decide DISCONNECTED/POLLING/ERROR transitions
 //! and emit FTMS started/stopped events.
+//!
+//! Build `--features simulation` to skip UART and drive synthetic bike
+//! data instead, matching the C++ firmware's SIMULATION_MODE.
 
-mod bike_serial;
 mod ble_server;
+mod status_led;
+
+#[cfg(not(feature = "simulation"))]
+mod bike_serial;
 
 use std::{
     thread,
@@ -20,19 +27,25 @@ use std::{
 };
 
 use esp_idf_svc::hal::peripherals::Peripherals;
-use lode_protocol::state_machine::{on_error_tick, on_poll_result, on_version_ok, LodeState};
 
-use bike_serial::BikeSerial;
 use ble_server::BleServer;
+use status_led::{LedState, StatusLed};
 
-/// How often to poll PM/RM when connected.
+/// How often to poll PM/RM when connected (or emit synthetic data in sim).
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// How often to attempt reconnect when DISCONNECTED.
+#[cfg(not(feature = "simulation"))]
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 /// Main-loop idle sleep between work checks.
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
 /// Consecutive full-failure poll cycles before transitioning to ERROR.
+#[cfg(not(feature = "simulation"))]
 const MAX_RETRIES: u32 = 3;
+
+/// LED blink periods matching the C++ firmware's semantics.
+const LED_BLINK_ADVERTISING: Duration = Duration::from_millis(1000);
+#[cfg(not(feature = "simulation"))]
+const LED_BLINK_BIKE_DISCONNECTED: Duration = Duration::from_millis(200);
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -41,26 +54,49 @@ fn main() -> anyhow::Result<()> {
     log::info!("Lode FTMS Bridge v{}", env!("CARGO_PKG_VERSION"));
     log::info!("Target: ESP32-C6 (riscv32imac)");
 
+    #[cfg(feature = "simulation")]
+    log::warn!("SIMULATION MODE: RS-232 layer skipped, synthetic bike data");
+
     let peripherals = Peripherals::take()?;
 
-    // XIAO ESP32-C6: D6 = GPIO16 (TX to bike), D7 = GPIO17 (RX from bike).
-    let mut bike = BikeSerial::new(
-        peripherals.uart1,
-        peripherals.pins.gpio16,
-        peripherals.pins.gpio17,
-    )
-    .map_err(|e| anyhow::anyhow!("UART init failed: {e:?}"))?;
-    log::info!("UART1 open @ 9600 8N1 on D6(GPIO16) TX / D7(GPIO17) RX");
+    // XIAO ESP32-C6 user LED - GPIO15, active-low.
+    let led = StatusLed::new(peripherals.pins.gpio15)?;
 
     let ble = BleServer::new()?;
 
-    // State machine state. u32 error_count matches the pure-module API.
+    #[cfg(feature = "simulation")]
+    run_sim_loop(&ble, led);
+
+    #[cfg(not(feature = "simulation"))]
+    run_real_loop(ble, led, peripherals.uart1, peripherals.pins.gpio16, peripherals.pins.gpio17)
+}
+
+// ---------------------------------------------------------------------------
+// Real-bike loop
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "simulation"))]
+fn run_real_loop<TxPin, RxPin, Uart1>(
+    ble: BleServer,
+    mut led: StatusLed<'_>,
+    uart: Uart1,
+    tx: TxPin,
+    rx: RxPin,
+) -> anyhow::Result<()>
+where
+    TxPin: esp_idf_svc::hal::gpio::OutputPin + 'static,
+    RxPin: esp_idf_svc::hal::gpio::InputPin + 'static,
+    Uart1: esp_idf_svc::hal::uart::Uart + 'static,
+{
+    use bike_serial::BikeSerial;
+    use lode_protocol::state_machine::{on_error_tick, on_poll_result, on_version_ok, LodeState};
+
+    let mut bike = BikeSerial::new(uart, tx, rx)
+        .map_err(|e| anyhow::anyhow!("UART init failed: {e:?}"))?;
+    log::info!("UART1 open @ 9600 8N1 on D6(GPIO16) TX / D7(GPIO17) RX");
+
     let mut state = LodeState::Disconnected;
     let mut error_count = 0u32;
-
-    // Timers. Initialized to "now" so the first poll happens one interval
-    // after boot - gives the bike a moment to settle and the BLE stack a
-    // moment to get advertising up.
     let mut last_poll = Instant::now();
     let mut last_reconnect = Instant::now();
 
@@ -89,19 +125,10 @@ fn main() -> anyhow::Result<()> {
                 if last_poll.elapsed() >= POLL_INTERVAL {
                     last_poll = Instant::now();
 
-                    // Apply any pending target, retry on failure.
                     if let Some(target) = ble.take_target() {
-                        // Target is clamped to [MIN_POWER_WATTS, MAX_POWER_WATTS]
-                        // by the Control Point handler (both > 0), so max(0)
-                        // is defensive but never actually runs. try_from of
-                        // a guaranteed-nonneg i16 into u16 cannot fail.
-                        let watts_u16 = u16::try_from(target.max(0)).expect("i16 >= 0 fits in u16");
+                        let watts_u16 =
+                            u16::try_from(target.max(0)).expect("i16 >= 0 fits in u16");
 
-                        // Programmable control units (types 21-22) sit in a
-                        // menu by default and silently ignore SP until put in
-                        // terminal mode. Standard Control Unit (type 20) is
-                        // always terminal - this short-circuits there.
-                        // Matches the C++ firmware's setLoadInternal flow.
                         let apply = bike
                             .ensure_terminal_mode()
                             .and_then(|()| bike.set_load(watts_u16));
@@ -118,19 +145,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    // Poll watts + rpm. Option<i32> feeds the state machine.
                     let watts = bike.request_load().ok();
                     let rpm = bike.request_rpm().ok();
 
-                    // Push notification to the app for any reading we got.
-                    // Use the last-known value for a missing channel by
-                    // picking 0 - fine for a single tick, and still
-                    // conveys "one channel returned" to the iOS side.
                     if watts.is_some() || rpm.is_some() {
-                        // The parser already validates values are in -10..=2000
-                        // via ParseError::OutOfRange, so these casts can't
-                        // truncate in practice. try_from failing would mean
-                        // a bug in the parser; fall back to 0 and log.
                         let w = i16::try_from(watts.unwrap_or(0)).unwrap_or_else(|_| {
                             log::warn!("watts out of i16 range: {watts:?}");
                             0
@@ -156,15 +174,70 @@ fn main() -> anyhow::Result<()> {
                 if t.notify.stopped {
                     ble.notify_stopped();
                 }
-                // Reset the reconnect clock so we try immediately after
-                // the error tick, not 2s later. checked_sub protects against
-                // the (very brief) window right after boot where Instant::now
-                // may be shorter than RECONNECT_INTERVAL.
                 last_reconnect = Instant::now()
                     .checked_sub(RECONNECT_INTERVAL)
                     .unwrap_or_else(Instant::now);
             }
         }
+
+        // LED state: connected > advertising > bike-disconnected
+        led.set(if ble.is_client_connected() {
+            LedState::SolidOn
+        } else if matches!(state, LodeState::Polling) {
+            LedState::Blink(LED_BLINK_ADVERTISING)
+        } else {
+            LedState::Blink(LED_BLINK_BIKE_DISCONNECTED)
+        });
+        led.tick();
+
+        thread::sleep(TICK_INTERVAL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simulation loop
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "simulation")]
+fn run_sim_loop(ble: &BleServer, mut led: StatusLed<'_>) -> ! {
+    use ble_server::{MAX_POWER_WATTS, MIN_POWER_WATTS};
+
+    // Starting values mirror the C++ firmware's simWatts=100, simRPM=75.
+    let mut sim_watts: i16 = 100;
+    let sim_rpm: u16 = 75;
+    let mut tick: u32 = 0;
+
+    ble.notify_started();
+    log::info!("SIM: emitting bike data every {} ms", POLL_INTERVAL.as_millis());
+
+    let mut last_emit = Instant::now();
+    loop {
+        if last_emit.elapsed() >= POLL_INTERVAL {
+            last_emit = Instant::now();
+            tick = tick.wrapping_add(1);
+
+            if let Some(target) = ble.take_target() {
+                sim_watts = target.clamp(MIN_POWER_WATTS, MAX_POWER_WATTS);
+                log::info!("SIM: target applied: {sim_watts} W");
+                ble.notify_target_confirmed(sim_watts);
+            }
+
+            // Tiny deterministic pseudo-noise so app graphs look alive.
+            // Range: -4..=3 W via a cheap LCG-like hash of the tick counter.
+            let noise = (tick.wrapping_mul(2_654_435_769) >> 29) as i16 - 4;
+            let displayed_watts = sim_watts.saturating_add(noise);
+
+            ble.notify_bike_data(displayed_watts, sim_rpm);
+            log::debug!("SIM: notified watts={displayed_watts} rpm={sim_rpm}");
+        }
+
+        // LED: SolidOn when a client is attached, slow-blink while we wait.
+        led.set(if ble.is_client_connected() {
+            LedState::SolidOn
+        } else {
+            LedState::Blink(LED_BLINK_ADVERTISING)
+        });
+        led.tick();
 
         thread::sleep(TICK_INTERVAL);
     }

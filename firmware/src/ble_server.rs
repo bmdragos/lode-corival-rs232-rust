@@ -12,7 +12,10 @@
 //! watts value; the main poll loop reads it via [`BleServer::take_target`]
 //! and applies it to the bike under its own lock.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use esp32_nimble::{
     utilities::{mutex::Mutex as NimbleMutex, BleUuid},
@@ -66,6 +69,7 @@ pub struct BleServer {
     bike_data_char: Arc<NimbleMutex<BLECharacteristic>>,
     status_char: Arc<NimbleMutex<BLECharacteristic>>,
     target: Arc<Mutex<Option<i16>>>,
+    client_connected: Arc<AtomicBool>,
 }
 
 impl BleServer {
@@ -82,16 +86,25 @@ impl BleServer {
         BLEDevice::set_device_name("Lode Bike")
             .map_err(|e| anyhow::anyhow!("set_device_name: {e:?}"))?;
 
+        // Tracked connection state so the main loop (and status LED) can
+        // see whether a BLE client is attached without calling into
+        // NimBLE from arbitrary threads.
+        let client_connected: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
         let server = device.get_server();
-        server.on_connect(|_, desc| {
+        let connected_on_connect = Arc::clone(&client_connected);
+        server.on_connect(move |_, desc| {
             log::info!("BLE client connected: {desc:?}");
+            connected_on_connect.store(true, Ordering::Release);
         });
 
         // Auto-resume advertising on disconnect. Without this, the first
         // client that connects and drops takes advertising down until reboot.
         let advertising_on_disconnect = device.get_advertising();
+        let connected_on_disconnect = Arc::clone(&client_connected);
         server.on_disconnect(move |_, reason| {
             log::info!("BLE client disconnected ({reason:?}) - resuming advertising");
+            connected_on_disconnect.store(false, Ordering::Release);
             if let Err(e) = advertising_on_disconnect.lock().start() {
                 log::warn!("Failed to restart advertising: {e:?}");
             }
@@ -170,7 +183,15 @@ impl BleServer {
             bike_data_char,
             status_char,
             target,
+            client_connected,
         })
+    }
+
+    /// Is a BLE client currently attached? Driven by the on_connect /
+    /// on_disconnect callbacks. Consumed by the status LED.
+    #[must_use]
+    pub fn is_client_connected(&self) -> bool {
+        self.client_connected.load(Ordering::Acquire)
     }
 
     /// Take any pending target-power request written by the Control Point
@@ -184,6 +205,7 @@ impl BleServer {
     /// bike rejected (RS-232 NAK, timeout, etc.). Does nothing if a newer
     /// request has already been written by the BLE callback - the newer
     /// value wins, which matches the C++ firmware's intent.
+    #[cfg_attr(feature = "simulation", allow(dead_code))]
     pub fn requeue_if_empty(&self, watts: i16) {
         let mut guard = self.target.lock().unwrap();
         if guard.is_none() {
@@ -207,6 +229,7 @@ impl BleServer {
     }
 
     /// FTMS Status: bike disconnected / stopped. Param 0x01 = stop.
+    #[cfg_attr(feature = "simulation", allow(dead_code))]
     pub fn notify_stopped(&self) {
         self.status_char
             .lock()

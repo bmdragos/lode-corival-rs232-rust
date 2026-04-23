@@ -12,6 +12,12 @@ harness = false # do not use the built-in cargo test harness -> resolve rust-ana
 
 # Profiles are defined at the workspace root.
 
+[features]
+# Synthetic bike data for testing BLE flow without the RS-232 hardware.
+# Skips UART init entirely and pins the state machine to Polling with
+# fake watts/rpm. Mirrors the C++ firmware's SIMULATION_MODE.
+simulation = []
+
 [dependencies]
 log = "0.4"
 anyhow = "1"
