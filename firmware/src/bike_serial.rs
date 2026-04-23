@@ -24,9 +24,11 @@ use esp_idf_svc::{
 
 use lode_protocol::lode_parser::{parse_numeric_response, ParseError};
 
-/// Device number in the Lode address. Configurable 0-99 per spec, but
-/// a Corival with a single control unit is always 0.
-pub const LODE_DEVICE_NUM: u8 = 0;
+/// Device number in the Lode address. Configurable 0-99 per spec.
+/// The hardware in hand responds as device 1 on VR, so we address and
+/// parse for 1. If a future unit uses a different address, update here
+/// (or lift to a runtime config / sdkconfig entry).
+pub const LODE_DEVICE_NUM: u8 = 1;
 
 /// Bike status code for "Terminal mode" (the only mode that accepts SP).
 /// Values 0-7 are menu screens on the programmable control units.
@@ -151,13 +153,24 @@ impl<'d> BikeSerial<'d> {
     /// units (types 21-22) may be in a menu screen, in which case `TR`
     /// brings them back.
     pub fn ensure_terminal_mode(&mut self) -> Result<(), BikeError> {
-        let status = self.request_status()?;
-        if status == LODE_STATUS_TERMINAL {
-            return Ok(());
+        match self.request_status() {
+            Ok(s) if s == LODE_STATUS_TERMINAL => Ok(()),
+            Ok(s) => {
+                log::info!("Bike in status {s}, switching to terminal mode");
+                self.send_command("TR")?;
+                match self.read_ack() {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        log::warn!("TR NAK/err: {e:?}");
+                        Err(e)
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("RS request failed: {e:?}");
+                Err(e)
+            }
         }
-        log::info!("Bike in status {status}, switching to terminal mode");
-        self.send_command("TR")?;
-        self.read_ack()
     }
 
     // ---- internals ---------------------------------------------------
@@ -238,26 +251,24 @@ impl<'d> BikeSerial<'d> {
         Ok(parse_numeric_response(s, LODE_DEVICE_NUM)?)
     }
 
-    /// Read a single-byte ACK (0x06) or fail with Nak.
+    /// Read a framed ACK response per the Lode protocol.
+    ///
+    /// Format: `"<device>,<ACK_byte>\r"` (CR is stripped by read_response).
+    /// Check the byte after the comma - 0x06 means success, anything else
+    /// (including 0x15 NAK and stray bytes) is treated as failure.
+    ///
+    /// Note: set commands (SP, ST, TR, MM) all use this framing; the bare
+    /// 0x06/0x15 single-byte form some older docs suggest is not what the
+    /// Corival V6.02 firmware actually emits.
     fn read_ack(&mut self) -> Result<(), BikeError> {
-        let start = Instant::now();
-        loop {
-            if start.elapsed() > RESPONSE_COMPLETE_TIMEOUT {
-                return Err(BikeError::Timeout);
-            }
-            let mut byte = [0u8; 1];
-            let n = self.uart.read(&mut byte, 1).unwrap_or(0);
-            if n == 0 {
-                thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            // ACK (0x06) is success; anything else (NAK 0x15 or stray byte
-            // from corrupted framing) is treated as a failed SET command.
-            return if byte[0] == ACK {
-                Ok(())
-            } else {
-                Err(BikeError::Nak)
-            };
+        let bytes = self.read_response()?;
+        match bytes
+            .iter()
+            .position(|&b| b == b',')
+            .and_then(|i| bytes.get(i + 1))
+        {
+            Some(&ACK) => Ok(()),
+            _ => Err(BikeError::Nak),
         }
     }
 }

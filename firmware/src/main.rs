@@ -105,7 +105,7 @@ where
             LodeState::Disconnected => {
                 if last_reconnect.elapsed() >= RECONNECT_INTERVAL {
                     last_reconnect = Instant::now();
-                    log::debug!("Attempting bike connection...");
+                    log::info!("Attempting bike connection (VR)...");
                     match bike.request_version() {
                         Ok(v) => {
                             log::info!("Bike online, version: {}", v.trim());
@@ -116,7 +116,7 @@ where
                                 ble.notify_started();
                             }
                         }
-                        Err(e) => log::debug!("VR failed: {e:?}"),
+                        Err(e) => log::info!("VR failed: {e:?}"),
                     }
                 }
             }
