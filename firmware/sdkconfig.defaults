@@ -6,7 +6,35 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
 
-# You might have to increase this further if you spawn your own Rust threads 
-# that allocate large stack variables; or better yet - use 
+# You might have to increase this further if you spawn your own Rust threads
+# that allocate large stack variables; or better yet - use
 # `std::thread::Builder::new().stack_size(XXX)` for spawning
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+
+# ---- Bluetooth (NimBLE peripheral) --------------------------------------
+# Enable BT with NimBLE host (smaller than Bluedroid, what esp32-nimble wraps).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=y
+
+# Peripheral only - we advertise a GATT server and iOS connects to us.
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+
+# Legacy advertising (FTMS uses 16-bit UUIDs; extended adv is unnecessary).
+CONFIG_BT_NIMBLE_EXT_ADV=n
+
+# One iOS client at a time.
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+
+# iOS reconnect requires bond persistence (esp32-nimble issue #56/#24).
+# Without NVS_PERSIST, each reconnect prompts for pairing again.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# Secure Connections pairing (required by modern iOS).
+CONFIG_BT_NIMBLE_SM_SC=y
+
+# BT task needs extra stack for NimBLE + esp32-nimble's callback closures.
+CONFIG_BT_NIMBLE_TASK_STACK_SIZE=8192

@@ -11,8 +11,23 @@ build-std = ["std", "panic_abort"]
 
 [env]
 MCU = "esp32c6"
-ESP_IDF_VERSION = "v5.5.3"
+# Pinned to v5.5.1 because esp32-nimble 0.12 tracks that version explicitly
+# (esp32-nimble CHANGELOG: "Add support for ESP IDF v5.5.1"). v5.5.3 renames
+# some NimBLE platform-layer functions (e.g. npl_freertos_hw_exit_critical)
+# and breaks ~650 call sites in esp32-nimble. Revisit when esp32-nimble
+# ships a v5.5.3 compatibility release.
+ESP_IDF_VERSION = "v5.5.1"
 ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
+
+# In a workspace, embuild cannot auto-detect which crate owns the ESP-IDF
+# build (our lode-protocol is no_std and doesn't want bindings). Explicitly
+# pointing at the firmware crate ensures firmware/sdkconfig.defaults is
+# applied, so BT_NIMBLE_* settings actually land in the generated sdkconfig.
+ESP_IDF_SYS_ROOT_CRATE = "firmware"
+
+# Belt-and-suspenders: explicitly point at our sdkconfig.defaults. Using a
+# relative path so the build is portable across checkouts.
+ESP_IDF_SDKCONFIG_DEFAULTS = { value = "sdkconfig.defaults", relative = true }
 
 # Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
 # Required for now due to embuild limitations.

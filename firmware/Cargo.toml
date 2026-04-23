@@ -16,6 +16,7 @@ harness = false # do not use the built-in cargo test harness -> resolve rust-ana
 log = "0.4"
 anyhow = "1"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+esp32-nimble = "0.12"
 lode-protocol = { path = "../lode-protocol" }
 
 [build-dependencies]
