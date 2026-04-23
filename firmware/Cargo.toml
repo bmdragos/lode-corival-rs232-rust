@@ -21,3 +21,17 @@ lode-protocol = { path = "../lode-protocol" }
 
 [build-dependencies]
 embuild = "0.33"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Allowed: these fire a lot without real signal in firmware / FFI code.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# "NimBLE", "FTMS", "RS-232" etc. in docs aren't code identifiers; the
+# pedantic doc_markdown lint flags them as if they were. Allow.
+doc_markdown = "allow"
+# This one is firmware-specific: the BLE callback closure and main loop
+# both need the target Arc; the pedantic lint flags every Arc::clone as
+# "could be simplified." Not useful here.
+similar_names = "allow"

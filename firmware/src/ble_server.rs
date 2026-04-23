@@ -12,8 +12,6 @@
 //! watts value; the main poll loop reads it via [`BleServer::take_target`]
 //! and applies it to the bike under its own lock.
 
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 
 use esp32_nimble::{
@@ -22,9 +20,7 @@ use esp32_nimble::{
 };
 
 use lode_protocol::{
-    ftms_control_point::{
-        handle_ftms_control_point, FtmsCpAction, FTMS_CP_RESPONSE_SIZE,
-    },
+    ftms_control_point::{handle_ftms_control_point, FtmsCpAction, FTMS_CP_RESPONSE_SIZE},
     ftms_encoder::encode_indoor_bike_data,
 };
 
@@ -97,10 +93,9 @@ impl BleServer {
             .create_characteristic(FTMS_FEATURE_UUID, NimbleProperties::READ);
         feature_char.lock().set_value(&FEATURE_BYTES);
 
-        let bike_data_char = service.lock().create_characteristic(
-            FTMS_INDOOR_BIKE_DATA_UUID,
-            NimbleProperties::NOTIFY,
-        );
+        let bike_data_char = service
+            .lock()
+            .create_characteristic(FTMS_INDOOR_BIKE_DATA_UUID, NimbleProperties::NOTIFY);
 
         let cp_char = service.lock().create_characteristic(
             FTMS_CONTROL_POINT_UUID,
@@ -121,8 +116,7 @@ impl BleServer {
             let data = args.recv_data();
             log::debug!("CP write: {data:02X?}");
 
-            let Some(result) =
-                handle_ftms_control_point(data, MIN_POWER_WATTS, MAX_POWER_WATTS)
+            let Some(result) = handle_ftms_control_point(data, MIN_POWER_WATTS, MAX_POWER_WATTS)
             else {
                 return;
             };
@@ -145,10 +139,7 @@ impl BleServer {
 
             // Indicate the response back (char has INDICATE property).
             debug_assert_eq!(result.response.len(), FTMS_CP_RESPONSE_SIZE);
-            cp_char_for_cb
-                .lock()
-                .set_value(&result.response)
-                .notify();
+            cp_char_for_cb.lock().set_value(&result.response).notify();
         });
 
         // Advertise as "Lode Bike" with the FTMS service UUID visible in
@@ -197,7 +188,10 @@ impl BleServer {
 
     /// FTMS Status: bike connected.
     pub fn notify_started(&self) {
-        self.status_char.lock().set_value(&[FTMS_STATUS_STARTED]).notify();
+        self.status_char
+            .lock()
+            .set_value(&[FTMS_STATUS_STARTED])
+            .notify();
     }
 
     /// FTMS Status: bike disconnected / stopped. Param 0x01 = stop.

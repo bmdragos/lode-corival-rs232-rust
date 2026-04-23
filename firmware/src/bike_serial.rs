@@ -1,8 +1,3 @@
-// Methods defined here are consumed by the state-machine wiring in
-// Phase 7/8; the surface is complete so we silence dead-code lints
-// for the unused ones during the intermediate phases.
-#![allow(dead_code)]
-
 //! Lode RS-232 protocol driver over ESP-IDF UART.
 //!
 //! Wraps `esp-idf-svc`'s UART driver with the Lode-specific framing:
@@ -44,10 +39,14 @@ const RESPONSE_COMPLETE_TIMEOUT: Duration = Duration::from_millis(100);
 const RESPONSE_BUFFER_SIZE: usize = 64;
 
 /// ACK from bike on `SP` / `TR` (matches Lode protocol spec).
+/// Any other byte (including 0x15 NAK) is treated as failure.
 const ACK: u8 = 0x06;
-/// NAK from bike on bad / out-of-range command.
-const NAK: u8 = 0x15;
 
+// The inner fields of Io(EspError) and Parse(ParseError) are only
+// observed through BikeError's Debug impl in the logging paths; the
+// dead-code lint doesn't consider Debug a "read". Allow the lint
+// rather than renaming fields.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum BikeError {
     /// Low-level ESP-IDF UART error.
@@ -58,7 +57,7 @@ pub enum BikeError {
     Parse(ParseError),
     /// Bike returned NAK or an unexpected byte where ACK was expected.
     Nak,
-    /// Response exceeded RESPONSE_BUFFER_SIZE without a CR.
+    /// Response exceeded [`RESPONSE_BUFFER_SIZE`] without a CR.
     BufferOverflow,
     /// Response bytes were not valid UTF-8 (Lode protocol is ASCII).
     InvalidString,
@@ -167,9 +166,9 @@ impl<'d> BikeSerial<'d> {
     /// Sleeps the current task if the last command was too recent.
     fn pace(&self) {
         if let Some(last) = self.last_command {
-            let elapsed = last.elapsed();
-            if elapsed < MIN_COMMAND_INTERVAL {
-                thread::sleep(MIN_COMMAND_INTERVAL - elapsed);
+            // checked_sub returns None when enough time has already passed.
+            if let Some(remaining) = MIN_COMMAND_INTERVAL.checked_sub(last.elapsed()) {
+                thread::sleep(remaining);
             }
         }
     }
@@ -252,10 +251,12 @@ impl<'d> BikeSerial<'d> {
                 thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            return match byte[0] {
-                ACK => Ok(()),
-                NAK => Err(BikeError::Nak),
-                _ => Err(BikeError::Nak),
+            // ACK (0x06) is success; anything else (NAK 0x15 or stray byte
+            // from corrupted framing) is treated as a failed SET command.
+            return if byte[0] == ACK {
+                Ok(())
+            } else {
+                Err(BikeError::Nak)
             };
         }
     }

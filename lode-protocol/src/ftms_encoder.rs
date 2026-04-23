@@ -59,7 +59,10 @@ mod tests {
         let buf = encode_indoor_bike_data(100, 75);
         assert_eq!(buf[0], 0x44); // bit 2 + bit 6
         assert_eq!(buf[1], 0x00);
-        assert_eq!(read_u16(&buf[0..2]), FTMS_IBD_FLAG_CADENCE | FTMS_IBD_FLAG_POWER);
+        assert_eq!(
+            read_u16(&buf[0..2]),
+            FTMS_IBD_FLAG_CADENCE | FTMS_IBD_FLAG_POWER
+        );
     }
 
     #[test]

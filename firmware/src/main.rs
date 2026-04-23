@@ -91,11 +91,22 @@ fn main() -> anyhow::Result<()> {
 
                     // Apply any pending target, retry on failure.
                     if let Some(target) = ble.take_target() {
-                        // Target is clamped by the Control Point handler;
-                        // convert to unsigned for the set_load API (bike
-                        // doesn't accept negative watts).
-                        let watts_u16 = target.max(0) as u16;
-                        match bike.set_load(watts_u16) {
+                        // Target is clamped to [MIN_POWER_WATTS, MAX_POWER_WATTS]
+                        // by the Control Point handler (both > 0), so max(0)
+                        // is defensive but never actually runs. try_from of
+                        // a guaranteed-nonneg i16 into u16 cannot fail.
+                        let watts_u16 = u16::try_from(target.max(0)).expect("i16 >= 0 fits in u16");
+
+                        // Programmable control units (types 21-22) sit in a
+                        // menu by default and silently ignore SP until put in
+                        // terminal mode. Standard Control Unit (type 20) is
+                        // always terminal - this short-circuits there.
+                        // Matches the C++ firmware's setLoadInternal flow.
+                        let apply = bike
+                            .ensure_terminal_mode()
+                            .and_then(|()| bike.set_load(watts_u16));
+
+                        match apply {
                             Ok(()) => {
                                 log::info!("SP applied: {target} W");
                                 ble.notify_target_confirmed(target);
@@ -116,8 +127,18 @@ fn main() -> anyhow::Result<()> {
                     // picking 0 - fine for a single tick, and still
                     // conveys "one channel returned" to the iOS side.
                     if watts.is_some() || rpm.is_some() {
-                        let w = watts.unwrap_or(0) as i16;
-                        let r = rpm.unwrap_or(0).max(0) as u16;
+                        // The parser already validates values are in -10..=2000
+                        // via ParseError::OutOfRange, so these casts can't
+                        // truncate in practice. try_from failing would mean
+                        // a bug in the parser; fall back to 0 and log.
+                        let w = i16::try_from(watts.unwrap_or(0)).unwrap_or_else(|_| {
+                            log::warn!("watts out of i16 range: {watts:?}");
+                            0
+                        });
+                        let r = u16::try_from(rpm.unwrap_or(0).max(0)).unwrap_or_else(|_| {
+                            log::warn!("rpm out of u16 range: {rpm:?}");
+                            0
+                        });
                         ble.notify_bike_data(w, r);
                     }
 
@@ -136,8 +157,12 @@ fn main() -> anyhow::Result<()> {
                     ble.notify_stopped();
                 }
                 // Reset the reconnect clock so we try immediately after
-                // the error tick, not 2s later.
-                last_reconnect = Instant::now() - RECONNECT_INTERVAL;
+                // the error tick, not 2s later. checked_sub protects against
+                // the (very brief) window right after boot where Instant::now
+                // may be shorter than RECONNECT_INTERVAL.
+                last_reconnect = Instant::now()
+                    .checked_sub(RECONNECT_INTERVAL)
+                    .unwrap_or_else(Instant::now);
             }
         }
 

@@ -110,7 +110,10 @@ mod tests {
     #[test]
     fn request_control() {
         let r = call(&[FTMS_CP_REQUEST_CONTROL]).unwrap();
-        assert_eq!(r.response, [0x80, FTMS_CP_REQUEST_CONTROL, FTMS_RESULT_SUCCESS]);
+        assert_eq!(
+            r.response,
+            [0x80, FTMS_CP_REQUEST_CONTROL, FTMS_RESULT_SUCCESS]
+        );
         assert_eq!(r.action, FtmsCpAction::RequestControl);
     }
 
@@ -202,12 +205,12 @@ mod tests {
     #[test]
     fn custom_power_range_is_respected() {
         // 500 W requested, tighter range [50..200] clamps it down.
-        let r = handle_ftms_control_point(&[FTMS_CP_SET_TARGET_POWER, 0xF4, 0x01], 50, 200)
-            .unwrap();
+        let r =
+            handle_ftms_control_point(&[FTMS_CP_SET_TARGET_POWER, 0xF4, 0x01], 50, 200).unwrap();
         assert_eq!(r.action, FtmsCpAction::SetTargetPower(200));
 
-        let r = handle_ftms_control_point(&[FTMS_CP_SET_TARGET_POWER, 0x32, 0x00], 50, 200)
-            .unwrap();
+        let r =
+            handle_ftms_control_point(&[FTMS_CP_SET_TARGET_POWER, 0x32, 0x00], 50, 200).unwrap();
         assert_eq!(r.action, FtmsCpAction::SetTargetPower(50));
     }
 

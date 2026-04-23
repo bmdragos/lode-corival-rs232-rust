@@ -40,9 +40,7 @@ const MAX_VALUE: i32 = 2000;
 /// assert_eq!(parse_numeric_response("0,9999", 0), Err(ParseError::OutOfRange));
 /// ```
 pub fn parse_numeric_response(response: &str, expected_device: u8) -> Result<i32, ParseError> {
-    let (device_str, value_str) = response
-        .split_once(',')
-        .ok_or(ParseError::MalformedFrame)?;
+    let (device_str, value_str) = response.split_once(',').ok_or(ParseError::MalformedFrame)?;
 
     // Device number must be canonical: non-empty, all digits, no leading zero
     // on a multi-digit number. This keeps "01,5" != "1,5" so the prefix check
@@ -87,7 +85,7 @@ mod tests {
     fn valid_responses() {
         assert_eq!(parse_numeric_response("0,100", 0), Ok(100));
         assert_eq!(parse_numeric_response("0,0", 0), Ok(0));
-        assert_eq!(parse_numeric_response("0,7", 0), Ok(7));     // MIN_POWER_WATTS
+        assert_eq!(parse_numeric_response("0,7", 0), Ok(7)); // MIN_POWER_WATTS
         assert_eq!(parse_numeric_response("0,999", 0), Ok(999)); // MAX_POWER_WATTS
         assert_eq!(parse_numeric_response("0,2000", 0), Ok(2000));
     }
@@ -103,65 +101,134 @@ mod tests {
 
     #[test]
     fn wrong_device_number_is_rejected() {
-        assert_eq!(parse_numeric_response("5,100", 0), Err(ParseError::MalformedFrame));
-        assert_eq!(parse_numeric_response("1,100", 0), Err(ParseError::MalformedFrame));
-        assert_eq!(parse_numeric_response("10,100", 1), Err(ParseError::MalformedFrame));
-        assert_eq!(parse_numeric_response("0,100", 1), Err(ParseError::MalformedFrame));
+        assert_eq!(
+            parse_numeric_response("5,100", 0),
+            Err(ParseError::MalformedFrame)
+        );
+        assert_eq!(
+            parse_numeric_response("1,100", 0),
+            Err(ParseError::MalformedFrame)
+        );
+        assert_eq!(
+            parse_numeric_response("10,100", 1),
+            Err(ParseError::MalformedFrame)
+        );
+        assert_eq!(
+            parse_numeric_response("0,100", 1),
+            Err(ParseError::MalformedFrame)
+        );
     }
 
     #[test]
     fn prefix_collision_guards() {
         // "10,5" must not match expected_device=1 via loose prefix matching
-        assert_eq!(parse_numeric_response("10,5", 1), Err(ParseError::MalformedFrame));
+        assert_eq!(
+            parse_numeric_response("10,5", 1),
+            Err(ParseError::MalformedFrame)
+        );
         // "01,5" is not canonical form for device 0
-        assert_eq!(parse_numeric_response("01,5", 0), Err(ParseError::MalformedFrame));
+        assert_eq!(
+            parse_numeric_response("01,5", 0),
+            Err(ParseError::MalformedFrame)
+        );
     }
 
     // ---- framing problems ----------------------------------------------
 
     #[test]
     fn empty_input() {
-        assert_eq!(parse_numeric_response("", 0), Err(ParseError::MalformedFrame));
+        assert_eq!(
+            parse_numeric_response("", 0),
+            Err(ParseError::MalformedFrame)
+        );
     }
 
     #[test]
     fn malformed_frames() {
-        assert_eq!(parse_numeric_response("0", 0), Err(ParseError::MalformedFrame));
-        assert_eq!(parse_numeric_response(",100", 0), Err(ParseError::MalformedFrame));
-        assert_eq!(parse_numeric_response("0100", 0), Err(ParseError::MalformedFrame));
-        assert_eq!(parse_numeric_response("0 100", 0), Err(ParseError::MalformedFrame));
+        assert_eq!(
+            parse_numeric_response("0", 0),
+            Err(ParseError::MalformedFrame)
+        );
+        assert_eq!(
+            parse_numeric_response(",100", 0),
+            Err(ParseError::MalformedFrame)
+        );
+        assert_eq!(
+            parse_numeric_response("0100", 0),
+            Err(ParseError::MalformedFrame)
+        );
+        assert_eq!(
+            parse_numeric_response("0 100", 0),
+            Err(ParseError::MalformedFrame)
+        );
     }
 
     // ---- value problems ------------------------------------------------
 
     #[test]
     fn empty_value_after_comma() {
-        assert_eq!(parse_numeric_response("0,", 0), Err(ParseError::InvalidNumber));
+        assert_eq!(
+            parse_numeric_response("0,", 0),
+            Err(ParseError::InvalidNumber)
+        );
     }
 
     #[test]
     fn lone_minus_sign() {
-        assert_eq!(parse_numeric_response("0,-", 0), Err(ParseError::InvalidNumber));
+        assert_eq!(
+            parse_numeric_response("0,-", 0),
+            Err(ParseError::InvalidNumber)
+        );
     }
 
     #[test]
     fn garbage_characters_in_value() {
-        assert_eq!(parse_numeric_response("0,1ABC", 0), Err(ParseError::InvalidNumber));
-        assert_eq!(parse_numeric_response("0,ABC", 0), Err(ParseError::InvalidNumber));
-        assert_eq!(parse_numeric_response("0,1.5", 0), Err(ParseError::InvalidNumber));
-        assert_eq!(parse_numeric_response("0,1 2", 0), Err(ParseError::InvalidNumber));
-        assert_eq!(parse_numeric_response("0,X%#@", 0), Err(ParseError::InvalidNumber));
-        assert_eq!(parse_numeric_response("0,+100", 0), Err(ParseError::InvalidNumber));
+        assert_eq!(
+            parse_numeric_response("0,1ABC", 0),
+            Err(ParseError::InvalidNumber)
+        );
+        assert_eq!(
+            parse_numeric_response("0,ABC", 0),
+            Err(ParseError::InvalidNumber)
+        );
+        assert_eq!(
+            parse_numeric_response("0,1.5", 0),
+            Err(ParseError::InvalidNumber)
+        );
+        assert_eq!(
+            parse_numeric_response("0,1 2", 0),
+            Err(ParseError::InvalidNumber)
+        );
+        assert_eq!(
+            parse_numeric_response("0,X%#@", 0),
+            Err(ParseError::InvalidNumber)
+        );
+        assert_eq!(
+            parse_numeric_response("0,+100", 0),
+            Err(ParseError::InvalidNumber)
+        );
     }
 
     // ---- bounds --------------------------------------------------------
 
     #[test]
     fn out_of_range_values() {
-        assert_eq!(parse_numeric_response("0,2001", 0), Err(ParseError::OutOfRange));
-        assert_eq!(parse_numeric_response("0,999999", 0), Err(ParseError::OutOfRange));
-        assert_eq!(parse_numeric_response("0,-11", 0), Err(ParseError::OutOfRange));
-        assert_eq!(parse_numeric_response("0,-100", 0), Err(ParseError::OutOfRange));
+        assert_eq!(
+            parse_numeric_response("0,2001", 0),
+            Err(ParseError::OutOfRange)
+        );
+        assert_eq!(
+            parse_numeric_response("0,999999", 0),
+            Err(ParseError::OutOfRange)
+        );
+        assert_eq!(
+            parse_numeric_response("0,-11", 0),
+            Err(ParseError::OutOfRange)
+        );
+        assert_eq!(
+            parse_numeric_response("0,-100", 0),
+            Err(ParseError::OutOfRange)
+        );
     }
 
     #[test]
