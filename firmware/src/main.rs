@@ -1,51 +1,58 @@
 //! Lode FTMS Bridge firmware for ESP32-C6.
 //!
-//! Phase: hello-world linking check. Calls into `lode-protocol` from the
-//! main task to prove the pure-logic crate links correctly into an
-//! ESP-IDF binary for target.
+//! Phase 6: RS-232 driver integrated. The main task opens UART1 on
+//! D6 (TX) / D7 (RX), sends Lode commands at `POLL_INTERVAL`, and logs
+//! each round trip. Without a bike plugged in, requests will time out -
+//! that's the expected behavior and what the state machine will key on
+//! in the next phase.
+
+mod bike_serial;
 
 use std::{thread, time::Duration};
 
-use lode_protocol::{
-    ftms_control_point::{handle_ftms_control_point, FtmsCpAction, FTMS_CP_SET_TARGET_POWER},
-    ftms_encoder::encode_indoor_bike_data,
-    lode_parser::parse_numeric_response,
-    state_machine::{is_bike_connected, LodeState},
-};
+use esp_idf_svc::hal::peripherals::Peripherals;
+
+use bike_serial::{BikeError, BikeSerial};
+
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 fn main() -> anyhow::Result<()> {
-    // esp-idf-svc's default runtime patches. Required even for std main.
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
     log::info!("Lode FTMS Bridge v{}", env!("CARGO_PKG_VERSION"));
     log::info!("Target: ESP32-C6 (riscv32imac)");
 
-    // Smoke-test each pure module by exercising one representative call.
-    // If any of these fail to link, the build would have already failed -
-    // this just produces visible evidence in the serial log that the
-    // logic is reachable from the ESP32 task context.
-    let parsed = parse_numeric_response("0,150", 0);
-    log::info!("parse_numeric_response(\"0,150\", 0) = {parsed:?}");
+    let peripherals = Peripherals::take()?;
 
-    let ibd = encode_indoor_bike_data(150, 75);
-    log::info!("encode_indoor_bike_data(150, 75) = {ibd:02X?}");
+    // XIAO ESP32-C6: D6 = GPIO16 (TX to bike), D7 = GPIO17 (RX from bike).
+    // Matches the wiring documented in the .ino (MAX3232 TX <- D7, RX <- D6).
+    let mut bike = BikeSerial::new(
+        peripherals.uart1,
+        peripherals.pins.gpio16,
+        peripherals.pins.gpio17,
+    )
+    .map_err(|e| anyhow::anyhow!("UART init failed: {e:?}"))?;
 
-    let cp = handle_ftms_control_point(&[FTMS_CP_SET_TARGET_POWER, 0x96, 0x00], 7, 1000);
-    log::info!("handle_ftms_control_point(set_target=150W) = {cp:?}");
-    assert!(matches!(
-        cp.map(|r| r.action),
-        Some(FtmsCpAction::SetTargetPower(150))
-    ));
+    log::info!("UART1 open @ 9600 8N1 on D6(GPIO16) TX / D7(GPIO17) RX");
 
-    log::info!(
-        "is_bike_connected(Polling) = {}",
-        is_bike_connected(LodeState::Polling)
-    );
-
-    log::info!("All pure modules reachable. Idling main task.");
-    loop {
-        thread::sleep(Duration::from_secs(5));
-        log::info!("tick");
+    // Attempt version exchange once at startup.
+    match bike.request_version() {
+        Ok(v) => log::info!("Bike version: {v}"),
+        Err(e) => log::warn!("VR request failed ({e:?}) - bike may be offline"),
     }
+
+    loop {
+        match poll_once(&mut bike) {
+            Ok((watts, rpm)) => log::info!("PM = {watts}W, RM = {rpm} rpm"),
+            Err(e) => log::warn!("poll failed: {e:?}"),
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn poll_once(bike: &mut BikeSerial) -> Result<(i32, i32), BikeError> {
+    let watts = bike.request_load()?;
+    let rpm = bike.request_rpm()?;
+    Ok((watts, rpm))
 }
