@@ -12,14 +12,17 @@
 //! watts value; the main poll loop reads it via [`BleServer::take_target`]
 //! and applies it to the bike under its own lock.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
 };
 
 use esp32_nimble::{
     utilities::{mutex::Mutex as NimbleMutex, BleUuid},
-    BLEAdvertisementData, BLECharacteristic, BLEDevice, NimbleProperties,
+    BLEAdvertisementData, BLECharacteristic, BLEDevice, NimbleProperties, NotifyTxStatus,
 };
 
 use lode_protocol::{
@@ -63,11 +66,36 @@ const FTMS_STATUS_TARGET_POWER: u8 = 0x08; // param: int16 watts LE
 pub const MIN_POWER_WATTS: i16 = 7;
 pub const MAX_POWER_WATTS: i16 = 1000;
 
+/// How long we wait for a client to confirm a CP indication before
+/// giving up and releasing the in-flight gate. iOS clients confirm
+/// within milliseconds; macOS CoreBluetooth acting as central never
+/// confirms at all (see CLAUDE.md). The timeout keeps us responsive
+/// when talking to the latter.
+const CP_INDICATE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
+
 // ---- Public surface -----------------------------------------------------
 
 pub struct BleServer {
     bike_data_char: Arc<NimbleMutex<BLECharacteristic>>,
     status_char: Arc<NimbleMutex<BLECharacteristic>>,
+    cp_char: Arc<NimbleMutex<BLECharacteristic>>,
+    /// Pending Control Point response, queued by the on_write callback.
+    /// The main loop pops via [`BleServer::drain_cp_response`] and
+    /// dispatches the indication from its own thread — NEVER from the
+    /// on_write callback, which holds the cp_char mutex and would deadlock
+    /// (esp32-nimble 0.12 ble_characteristic.rs:229 documents this).
+    cp_response: Arc<Mutex<Option<[u8; FTMS_CP_RESPONSE_SIZE]>>>,
+    /// `true` when no CP indication is in flight. Cleared when we start
+    /// sending one, set again by `on_notify_tx` when NimBLE confirms
+    /// (success, timeout, or failure). Gates our own one-in-flight rule
+    /// since esp32-nimble 0.12's `set_indicate_wait` is a no-op (we
+    /// carry the upstream fix in `../esp32-nimble`, but the gate here
+    /// is still the authoritative one).
+    cp_indicate_idle: Arc<AtomicBool>,
+    /// Timestamp of the last in-flight indication send. Lets
+    /// `drain_cp_response` force-release the gate if the client never
+    /// confirms within `CP_INDICATE_CONFIRM_TIMEOUT`.
+    cp_indicate_sent_at: Arc<Mutex<Option<Instant>>>,
     target: Arc<Mutex<Option<i16>>>,
     client_connected: Arc<AtomicBool>,
 }
@@ -112,13 +140,24 @@ impl BleServer {
             }
         });
 
+        // CP indication state - gates one-at-a-time indication dispatch
+        // from the main loop (see `drain_cp_response`).
+        let cp_indicate_idle: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+        let cp_indicate_sent_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
         // Auto-resume advertising on disconnect. Without this, the first
         // client that connects and drops takes advertising down until reboot.
         let advertising_on_disconnect = device.get_advertising();
         let connected_on_disconnect = Arc::clone(&client_connected);
+        let cp_indicate_idle_on_disconnect = Arc::clone(&cp_indicate_idle);
+        let cp_indicate_sent_at_on_disconnect = Arc::clone(&cp_indicate_sent_at);
         server.on_disconnect(move |_, reason| {
             log::info!("BLE client disconnected ({reason:?}) - resuming advertising");
             connected_on_disconnect.store(false, Ordering::Release);
+            // Any pending indication is now moot - reset the gate so the
+            // next client doesn't inherit a stuck "busy" state.
+            cp_indicate_idle_on_disconnect.store(true, Ordering::Release);
+            *cp_indicate_sent_at_on_disconnect.lock().unwrap() = None;
             if let Err(e) = advertising_on_disconnect.lock().start() {
                 log::warn!("Failed to restart advertising: {e:?}");
             }
@@ -148,9 +187,15 @@ impl BleServer {
         // Shared target-power channel: BLE callback writes, main loop reads.
         let target: Arc<Mutex<Option<i16>>> = Arc::new(Mutex::new(None));
 
-        // Control Point handler - all dispatch lives in lode-protocol.
+        // Shared CP response slot: BLE callback writes, main loop drains.
+        let cp_response: Arc<Mutex<Option<[u8; FTMS_CP_RESPONSE_SIZE]>>> =
+            Arc::new(Mutex::new(None));
+
+        // Control Point write handler - queues the framed response for the
+        // main loop. Does NOT touch cp_char: the crate holds cp_char's
+        // mutex across this callback, so any re-lock here deadlocks.
         let target_for_cb = Arc::clone(&target);
-        let cp_char_for_cb = Arc::clone(&cp_char);
+        let cp_response_for_cb = Arc::clone(&cp_response);
         cp_char.lock().on_write(move |args| {
             let data = args.recv_data();
             log::debug!("CP write: {data:02X?}");
@@ -160,7 +205,6 @@ impl BleServer {
                 return;
             };
 
-            // Apply action to shared state; main loop picks it up next tick.
             match result.action {
                 FtmsCpAction::SetTargetPower(w) => {
                     *target_for_cb.lock().unwrap() = Some(w);
@@ -176,9 +220,43 @@ impl BleServer {
                 FtmsCpAction::Noop => {}
             }
 
-            // Indicate the response back (char has INDICATE property).
+            // Stash the framed response - main loop sends the indication.
             debug_assert_eq!(result.response.len(), FTMS_CP_RESPONSE_SIZE);
-            cp_char_for_cb.lock().set_value(&result.response).notify();
+            let mut bytes = [0u8; FTMS_CP_RESPONSE_SIZE];
+            bytes.copy_from_slice(&result.response);
+            *cp_response_for_cb.lock().unwrap() = Some(bytes);
+        });
+
+        // Notification-TX callback: fires on indication completion. We use
+        // it to clear our one-in-flight gate. On spec-compliant clients
+        // (iOS, Android) this fires with SuccessIndicate within ms. On
+        // macOS CoreBluetooth it may never fire until disconnect - the
+        // self-timeout in `drain_cp_response` covers that case.
+        let cp_indicate_idle_on_tx = Arc::clone(&cp_indicate_idle);
+        let cp_indicate_sent_at_on_tx = Arc::clone(&cp_indicate_sent_at);
+        cp_char.lock().on_notify_tx(move |tx| {
+            let release = match tx.status() {
+                NotifyTxStatus::SuccessIndicate => {
+                    log::debug!("CP indication confirmed");
+                    true
+                }
+                NotifyTxStatus::ErrorIndicateTimeout => {
+                    log::warn!("CP indication timed out");
+                    true
+                }
+                NotifyTxStatus::ErrorIndicateFailure | NotifyTxStatus::ErrorGatt => {
+                    log::warn!("CP indication failed ({:?})", tx.status());
+                    true
+                }
+                other => {
+                    log::debug!("CP notify_tx: {other:?}");
+                    false
+                }
+            };
+            if release {
+                cp_indicate_idle_on_tx.store(true, Ordering::Release);
+                *cp_indicate_sent_at_on_tx.lock().unwrap() = None;
+            }
         });
 
         // Advertise as "Lode Bike" with the FTMS service UUID visible in
@@ -196,6 +274,10 @@ impl BleServer {
         Ok(Self {
             bike_data_char,
             status_char,
+            cp_char,
+            cp_response,
+            cp_indicate_idle,
+            cp_indicate_sent_at,
             target,
             client_connected,
         })
@@ -225,6 +307,46 @@ impl BleServer {
         if guard.is_none() {
             *guard = Some(watts);
         }
+    }
+
+    /// Dispatch a queued Control Point response as an indication. The
+    /// main loop should call this every tick; it's cheap when the queue
+    /// is empty or an indication is still in flight.
+    pub fn drain_cp_response(&self) {
+        // If the gate is still "in flight" but nothing has come back in
+        // time, force-release. Covers macOS CoreBluetooth peers that
+        // never send Handle Value Confirmation.
+        if !self.cp_indicate_idle.load(Ordering::Acquire) {
+            let mut sent = self.cp_indicate_sent_at.lock().unwrap();
+            match *sent {
+                Some(t) if t.elapsed() >= CP_INDICATE_CONFIRM_TIMEOUT => {
+                    log::warn!(
+                        "CP indication unconfirmed after {:?}; releasing gate",
+                        CP_INDICATE_CONFIRM_TIMEOUT
+                    );
+                    self.cp_indicate_idle.store(true, Ordering::Release);
+                    *sent = None;
+                }
+                _ => return,
+            }
+        }
+
+        let mut cp = self.cp_char.lock();
+        // No subscribers means .notify() is a no-op and on_notify_tx will
+        // never fire - which would pin the idle gate at `false` forever.
+        // Drop the response and keep the gate open.
+        if cp.subscribed_count() == 0 {
+            if self.cp_response.lock().unwrap().take().is_some() {
+                log::debug!("CP response dropped: no subscribers");
+            }
+            return;
+        }
+        let Some(bytes) = self.cp_response.lock().unwrap().take() else {
+            return;
+        };
+        self.cp_indicate_idle.store(false, Ordering::Release);
+        *self.cp_indicate_sent_at.lock().unwrap() = Some(Instant::now());
+        cp.set_value(&bytes).notify();
     }
 
     /// Push a fresh Indoor Bike Data notification. Called once per poll

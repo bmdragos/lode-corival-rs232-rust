@@ -180,6 +180,10 @@ where
             }
         }
 
+        // Dispatch any queued CP indication response. Cheap no-op when
+        // nothing is pending or an indication is still in flight.
+        ble.drain_cp_response();
+
         // LED state: connected > advertising > bike-disconnected
         led.set(if ble.is_client_connected() {
             LedState::SolidOn
@@ -230,6 +234,8 @@ fn run_sim_loop(ble: &BleServer, mut led: StatusLed<'_>) -> ! {
             ble.notify_bike_data(displayed_watts, sim_rpm);
             log::debug!("SIM: notified watts={displayed_watts} rpm={sim_rpm}");
         }
+
+        ble.drain_cp_response();
 
         // LED: SolidOn when a client is attached, slow-blink while we wait.
         led.set(if ble.is_client_connected() {

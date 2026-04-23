@@ -89,6 +89,32 @@ comments, but summarized here:
    in the generated ESP-IDF config and so bindgen never sees the NimBLE
    headers.
 
+4. **`esp32-nimble` is patched via `[patch.crates-io]`** in the workspace
+   `Cargo.toml`, pointing at `../esp32-nimble` (a sibling checkout of our
+   fork at `bmdragos/esp32-nimble`, branch `lode-patches`). The fork
+   carries an upstream fix for `set_indicate_wait` being a no-op
+   predicate — submitted as taks/esp32-nimble#200. Once merged and
+   released, drop the patch.
+
+### Testing notes: BLE clients
+
+- **iOS apps (LightBlue, nRF Connect, first-party)**: authoritative. This
+  is the target platform and the BLE stack sends ATT Handle Value
+  Confirmations for indications as required by spec.
+- **bleak on macOS and the native Swift CBCentralManager**: both share
+  the macOS CoreBluetooth stack, which **does not send ATT Handle Value
+  Confirmation** back to a peripheral in response to an indication. The
+  indication's data reaches the client application (bleak callback or
+  log CSV), but the server never sees `SuccessIndicate` on its
+  `on_notify_tx`. Functional consequence: only the first CP indication
+  per connection round-trips cleanly; subsequent ones are dropped
+  server-side because NimBLE's single-in-flight gate never clears.
+  A 2-second self-timeout in `drain_cp_response` keeps the firmware
+  responsive regardless. Cosmetic: you'll see
+  "prior Indication in progress" log noise during a macOS-side sweep —
+  harmless, expected, will not appear with iOS.
+- **Android + nRF Connect**: fine. Android BLE stack sends HVCs correctly.
+
 ## Progress
 
 | Phase | Status |
