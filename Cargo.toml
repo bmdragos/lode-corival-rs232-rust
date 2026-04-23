@@ -6,7 +6,11 @@ members = [
 resolver = "2"
 
 [profile.release]
-opt-level = "s"
+opt-level = "s"    # size-optimized for firmware flash
 lto = true
 codegen-units = 1
-debug = 2
+debug = 2          # keep debug info; espflash strips for the flashed image
+
+[profile.dev]
+debug = true
+opt-level = "z"

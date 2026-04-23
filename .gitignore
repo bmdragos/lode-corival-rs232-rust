@@ -1,1 +1,14 @@
+# Rust build artifacts
 /target
+
+# ESP-IDF + toolchain cache (huge - 5 GB of downloaded SDK, cmake, gcc, etc.)
+/.embuild
+
+# Workspace-level lockfile tracked at firmware level if needed
+# (uncomment if firmware lock should be tracked separately)
+# /Cargo.lock
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
