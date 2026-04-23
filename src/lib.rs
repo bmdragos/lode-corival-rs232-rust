@@ -6,4 +6,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod ftms_control_point;
+pub mod ftms_encoder;
 pub mod lode_parser;
+pub mod state_machine;

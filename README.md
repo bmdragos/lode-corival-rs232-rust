@@ -13,16 +13,25 @@ the protocol modules are translated and tested.
 
 | Module | C++ source | Status |
 | --- | --- | --- |
-| `lode_parser` | `lode_parser.{h,cpp}` | in progress |
-| `ftms_encoder` | `ftms_encoder.{h,cpp}` | pending |
-| `ftms_control_point` | `ftms_control_point.{h,cpp}` | pending |
-| `state_machine` | `lode_state_machine.{h,cpp}` | pending |
+| `lode_parser` | `lode_parser.{h,cpp}` | ported |
+| `ftms_encoder` | `ftms_encoder.{h,cpp}` | ported |
+| `ftms_control_point` | `ftms_control_point.{h,cpp}` | ported |
+| `state_machine` | `lode_state_machine.{h,cpp}` | ported |
 
 ## Testing
 
 ```bash
 cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
-Tests run on the host — no ESP32 required. Target is feature parity with the
-206-assertion C++ test suite in the origin repo.
+Tests run on the host — no ESP32 required. All four pure modules have
+inline `#[cfg(test)]` blocks that cover the same cases as the origin repo's
+C++ doctest suite. Crate is `no_std` when not compiled for tests.
+
+## Hardware layer (not yet started)
+
+Target stack:
+- `esp-idf-svc` (base: UART, NVS, logging)
+- `esp-idf-hal` (pin configuration, `UartDriver` for RS-232)
+- `esp32-nimble` (BLE peripheral, FTMS GATT server)
