@@ -93,9 +93,23 @@ impl BleServer {
 
         let server = device.get_server();
         let connected_on_connect = Arc::clone(&client_connected);
-        server.on_connect(move |_, desc| {
+        server.on_connect(move |server, desc| {
             log::info!("BLE client connected: {desc:?}");
             connected_on_connect.store(true, Ordering::Release);
+
+            // Tighten connection params. NimBLE's defaults leave the
+            // supervision timeout long enough (up to ~30s) that macOS/iOS
+            // abrupt teardowns don't surface as on_disconnect until well
+            // after the peer stopped listening. During that window we
+            // stay "connected" from the device's POV and can't advertise
+            // again. These values are iOS-friendly (20-40ms interval,
+            // 0 latency, 2s supervision timeout).
+            //   interval_min/max: 1.25ms units
+            //   latency:          intervals skipped
+            //   timeout:          10ms units
+            if let Err(e) = server.update_conn_params(desc.conn_handle(), 16, 32, 0, 200) {
+                log::warn!("update_conn_params failed: {e:?}");
+            }
         });
 
         // Auto-resume advertising on disconnect. Without this, the first
