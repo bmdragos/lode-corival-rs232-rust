@@ -1,13 +1,12 @@
 [workspace]
-resolver = "2"
 members = [
+    "firmware",
     "lode-protocol",
-    # "firmware" will be added once ESP-IDF tooling is set up
 ]
+resolver = "2"
 
-# Workspace-wide profile settings apply to all member crates.
 [profile.release]
-opt-level = "s"    # size-optimized for firmware flash
+opt-level = "s"
 lto = true
 codegen-units = 1
-debug = true       # keep debug info; stripped at flash time if needed
+debug = 2
