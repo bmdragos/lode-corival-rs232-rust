@@ -75,14 +75,26 @@ impl BleServer {
     pub fn new() -> anyhow::Result<Self> {
         let device = BLEDevice::take();
 
+        // Set the GAP device name. Without this, esp32-nimble falls back
+        // to "nimble" whenever advertising auto-restarts after disconnect
+        // (the BLEAdvertisementData.name() we set later only governs the
+        // first advertising cycle).
+        BLEDevice::set_device_name("Lode Bike")
+            .map_err(|e| anyhow::anyhow!("set_device_name: {e:?}"))?;
+
         let server = device.get_server();
         server.on_connect(|_, desc| {
             log::info!("BLE client connected: {desc:?}");
         });
-        server.on_disconnect(|_, reason| {
+
+        // Auto-resume advertising on disconnect. Without this, the first
+        // client that connects and drops takes advertising down until reboot.
+        let advertising_on_disconnect = device.get_advertising();
+        server.on_disconnect(move |_, reason| {
             log::info!("BLE client disconnected ({reason:?}) - resuming advertising");
-            // esp32-nimble auto-restarts advertising on disconnect by
-            // default; log here for observability.
+            if let Err(e) = advertising_on_disconnect.lock().start() {
+                log::warn!("Failed to restart advertising: {e:?}");
+            }
         });
 
         // Service + characteristics.

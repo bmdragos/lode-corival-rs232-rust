@@ -38,3 +38,12 @@ CONFIG_BT_NIMBLE_SM_SC=y
 
 # BT task needs extra stack for NimBLE + esp32-nimble's callback closures.
 CONFIG_BT_NIMBLE_TASK_STACK_SIZE=8192
+
+# ---- Console (logging output) ------------------------------------------
+# XIAO ESP32-C6's USB-C is wired to USB-Serial-JTAG, not UART0. Route
+# log output there so `cargo run` / espflash monitor can see it.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Default log level: keep INFO so log::info!() lands on-wire.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
