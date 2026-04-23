@@ -32,7 +32,7 @@ const MAX_VALUE: i32 = 2000;
 /// # Examples
 ///
 /// ```
-/// use lode_corival_rs232::lode_parser::{parse_numeric_response, ParseError};
+/// use lode_protocol::lode_parser::{parse_numeric_response, ParseError};
 ///
 /// assert_eq!(parse_numeric_response("0,150", 0), Ok(150));
 /// assert_eq!(parse_numeric_response("1,60", 0), Err(ParseError::MalformedFrame));

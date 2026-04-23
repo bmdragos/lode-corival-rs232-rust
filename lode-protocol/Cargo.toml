@@ -1,0 +1,20 @@
+[package]
+name = "lode-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-logic protocol modules (RS-232 parsing, FTMS byte-packing, state machine) for the Lode Corival ergometer bridge. Host-testable, no_std-compatible."
+license = "MIT"
+
+[dependencies]
+
+# Lint settings geared toward a firmware crate.
+# Deny unsafe in pure-logic modules; we'll allow it only at hardware-layer boundaries later.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+# Sensible defaults for embedded-adjacent code.
+pedantic = { level = "warn", priority = -1 }
+# Allow a few pedantic lints that produce noise without much signal.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"

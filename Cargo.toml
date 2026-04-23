@@ -1,20 +1,13 @@
-[package]
-name = "lode_corival_rs232"
-version = "0.1.0"
-edition = "2024"
-description = "Pure logic + (later) ESP32-C6 firmware for the Lode Corival RS-232 / BLE FTMS bridge, ported from C++."
-license = "MIT"
+[workspace]
+resolver = "2"
+members = [
+    "lode-protocol",
+    # "firmware" will be added once ESP-IDF tooling is set up
+]
 
-[dependencies]
-
-# Lint settings geared toward a firmware crate.
-# Deny unsafe in pure-logic modules; we'll allow it only at hardware-layer boundaries later.
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-# Sensible defaults for embedded-adjacent code.
-pedantic = { level = "warn", priority = -1 }
-# Allow a few pedantic lints that produce noise without much signal.
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
+# Workspace-wide profile settings apply to all member crates.
+[profile.release]
+opt-level = "s"    # size-optimized for firmware flash
+lto = true
+codegen-units = 1
+debug = true       # keep debug info; stripped at flash time if needed

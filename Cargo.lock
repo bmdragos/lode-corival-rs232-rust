@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "lode_corival_rs232"
+name = "lode-protocol"
 version = "0.1.0"
