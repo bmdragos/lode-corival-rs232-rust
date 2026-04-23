@@ -15,9 +15,8 @@ debug = 2          # keep debug info; espflash strips for the flashed image
 debug = true
 opt-level = "z"
 
-# Local fork of esp32-nimble with fixes for:
-# - set_indicate_wait being a no-op predicate
-# - on_notify_tx never firing for SuccessIndicate
-# See /Users/bd/Coding/esp32-nimble (branch: lode-patches).
+# Fork of esp32-nimble with the set_indicate_wait fix.
+# Upstream PR: https://github.com/taks/esp32-nimble/pull/200
+# Drop this patch once that PR merges and a release ships.
 [patch.crates-io]
-esp32-nimble = { path = "../esp32-nimble" }
+esp32-nimble = { git = "https://github.com/bmdragos/esp32-nimble.git", branch = "main" }
