@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod cp_indication_gate;
 pub mod ftms_control_point;
 pub mod ftms_encoder;
 pub mod lode_parser;

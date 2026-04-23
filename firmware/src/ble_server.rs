@@ -26,6 +26,7 @@ use esp32_nimble::{
 };
 
 use lode_protocol::{
+    cp_indication_gate::CpIndicationGate,
     ftms_control_point::{handle_ftms_control_point, FtmsCpAction, FTMS_CP_RESPONSE_SIZE},
     ftms_encoder::encode_indoor_bike_data,
 };
@@ -79,23 +80,15 @@ pub struct BleServer {
     bike_data_char: Arc<NimbleMutex<BLECharacteristic>>,
     status_char: Arc<NimbleMutex<BLECharacteristic>>,
     cp_char: Arc<NimbleMutex<BLECharacteristic>>,
-    /// Pending Control Point response, queued by the on_write callback.
-    /// The main loop pops via [`BleServer::drain_cp_response`] and
-    /// dispatches the indication from its own thread — NEVER from the
-    /// on_write callback, which holds the cp_char mutex and would deadlock
-    /// (esp32-nimble 0.12 ble_characteristic.rs:229 documents this).
-    cp_response: Arc<Mutex<Option<[u8; FTMS_CP_RESPONSE_SIZE]>>>,
-    /// `true` when no CP indication is in flight. Cleared when we start
-    /// sending one, set again by `on_notify_tx` when NimBLE confirms
-    /// (success, timeout, or failure). Gates our own one-in-flight rule
-    /// since esp32-nimble 0.12's `set_indicate_wait` is a no-op (we
-    /// carry the upstream fix in `../esp32-nimble`, but the gate here
-    /// is still the authoritative one).
-    cp_indicate_idle: Arc<AtomicBool>,
-    /// Timestamp of the last in-flight indication send. Lets
-    /// `drain_cp_response` force-release the gate if the client never
-    /// confirms within `CP_INDICATE_CONFIRM_TIMEOUT`.
-    cp_indicate_sent_at: Arc<Mutex<Option<Instant>>>,
+    /// Queues CP responses from the on_write callback and serializes
+    /// their dispatch from the main loop. Pure logic - all state + the
+    /// one-in-flight + self-timeout rule lives in `lode-protocol`.
+    /// Never touched from within `on_write` directly on `cp_char`
+    /// (esp32-nimble 0.12 ble_characteristic.rs:229 forbids re-locking
+    /// the characteristic from its own callback).
+    cp_gate: Arc<Mutex<CpIndicationGate>>,
+    /// Monotonic reference point for the gate's millisecond clock.
+    cp_gate_epoch: Instant,
     target: Arc<Mutex<Option<i16>>>,
     client_connected: Arc<AtomicBool>,
 }
@@ -140,24 +133,24 @@ impl BleServer {
             }
         });
 
-        // CP indication state - gates one-at-a-time indication dispatch
-        // from the main loop (see `drain_cp_response`).
-        let cp_indicate_idle: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
-        let cp_indicate_sent_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        // CP indication gate - queues responses, serializes dispatch,
+        // self-releases on timeout. Pure logic tested in lode-protocol.
+        let cp_gate = Arc::new(Mutex::new(CpIndicationGate::new(
+            CP_INDICATE_CONFIRM_TIMEOUT,
+        )));
+        let cp_gate_epoch = Instant::now();
 
         // Auto-resume advertising on disconnect. Without this, the first
         // client that connects and drops takes advertising down until reboot.
         let advertising_on_disconnect = device.get_advertising();
         let connected_on_disconnect = Arc::clone(&client_connected);
-        let cp_indicate_idle_on_disconnect = Arc::clone(&cp_indicate_idle);
-        let cp_indicate_sent_at_on_disconnect = Arc::clone(&cp_indicate_sent_at);
+        let cp_gate_on_disconnect = Arc::clone(&cp_gate);
         server.on_disconnect(move |_, reason| {
             log::info!("BLE client disconnected ({reason:?}) - resuming advertising");
             connected_on_disconnect.store(false, Ordering::Release);
-            // Any pending indication is now moot - reset the gate so the
-            // next client doesn't inherit a stuck "busy" state.
-            cp_indicate_idle_on_disconnect.store(true, Ordering::Release);
-            *cp_indicate_sent_at_on_disconnect.lock().unwrap() = None;
+            // Any pending/in-flight indication is now moot - reset the
+            // gate so the next client starts with a clean slate.
+            cp_gate_on_disconnect.lock().unwrap().on_disconnect();
             if let Err(e) = advertising_on_disconnect.lock().start() {
                 log::warn!("Failed to restart advertising: {e:?}");
             }
@@ -187,15 +180,11 @@ impl BleServer {
         // Shared target-power channel: BLE callback writes, main loop reads.
         let target: Arc<Mutex<Option<i16>>> = Arc::new(Mutex::new(None));
 
-        // Shared CP response slot: BLE callback writes, main loop drains.
-        let cp_response: Arc<Mutex<Option<[u8; FTMS_CP_RESPONSE_SIZE]>>> =
-            Arc::new(Mutex::new(None));
-
-        // Control Point write handler - queues the framed response for the
-        // main loop. Does NOT touch cp_char: the crate holds cp_char's
+        // Control Point write handler - queues the framed response into
+        // the gate. Does NOT touch cp_char: the crate holds cp_char's
         // mutex across this callback, so any re-lock here deadlocks.
         let target_for_cb = Arc::clone(&target);
-        let cp_response_for_cb = Arc::clone(&cp_response);
+        let cp_gate_for_cb = Arc::clone(&cp_gate);
         cp_char.lock().on_write(move |args| {
             let data = args.recv_data();
             log::debug!("CP write: {data:02X?}");
@@ -220,20 +209,15 @@ impl BleServer {
                 FtmsCpAction::Noop => {}
             }
 
-            // Stash the framed response - main loop sends the indication.
             debug_assert_eq!(result.response.len(), FTMS_CP_RESPONSE_SIZE);
-            let mut bytes = [0u8; FTMS_CP_RESPONSE_SIZE];
-            bytes.copy_from_slice(&result.response);
-            *cp_response_for_cb.lock().unwrap() = Some(bytes);
+            cp_gate_for_cb.lock().unwrap().enqueue(result.response);
         });
 
-        // Notification-TX callback: fires on indication completion. We use
-        // it to clear our one-in-flight gate. On spec-compliant clients
-        // (iOS, Android) this fires with SuccessIndicate within ms. On
-        // macOS CoreBluetooth it may never fire until disconnect - the
-        // self-timeout in `drain_cp_response` covers that case.
-        let cp_indicate_idle_on_tx = Arc::clone(&cp_indicate_idle);
-        let cp_indicate_sent_at_on_tx = Arc::clone(&cp_indicate_sent_at);
+        // Notification-TX callback: fires on indication completion. On
+        // spec-compliant clients (iOS, Android) this fires with
+        // SuccessIndicate within ms. On macOS CoreBluetooth it may never
+        // fire until disconnect - the gate's self-timeout covers that.
+        let cp_gate_on_tx = Arc::clone(&cp_gate);
         cp_char.lock().on_notify_tx(move |tx| {
             let release = match tx.status() {
                 NotifyTxStatus::SuccessIndicate => {
@@ -254,8 +238,7 @@ impl BleServer {
                 }
             };
             if release {
-                cp_indicate_idle_on_tx.store(true, Ordering::Release);
-                *cp_indicate_sent_at_on_tx.lock().unwrap() = None;
+                cp_gate_on_tx.lock().unwrap().on_confirm();
             }
         });
 
@@ -275,9 +258,8 @@ impl BleServer {
             bike_data_char,
             status_char,
             cp_char,
-            cp_response,
-            cp_indicate_idle,
-            cp_indicate_sent_at,
+            cp_gate,
+            cp_gate_epoch,
             target,
             client_connected,
         })
@@ -313,40 +295,30 @@ impl BleServer {
     /// main loop should call this every tick; it's cheap when the queue
     /// is empty or an indication is still in flight.
     pub fn drain_cp_response(&self) {
-        // If the gate is still "in flight" but nothing has come back in
-        // time, force-release. Covers macOS CoreBluetooth peers that
-        // never send Handle Value Confirmation.
-        if !self.cp_indicate_idle.load(Ordering::Acquire) {
-            let mut sent = self.cp_indicate_sent_at.lock().unwrap();
-            match *sent {
-                Some(t) if t.elapsed() >= CP_INDICATE_CONFIRM_TIMEOUT => {
-                    log::warn!(
-                        "CP indication unconfirmed after {:?}; releasing gate",
-                        CP_INDICATE_CONFIRM_TIMEOUT
-                    );
-                    self.cp_indicate_idle.store(true, Ordering::Release);
-                    *sent = None;
-                }
-                _ => return,
-            }
-        }
-
         let mut cp = self.cp_char.lock();
-        // No subscribers means .notify() is a no-op and on_notify_tx will
-        // never fire - which would pin the idle gate at `false` forever.
-        // Drop the response and keep the gate open.
+        let mut gate = self.cp_gate.lock().unwrap();
+
+        // No subscribers means .notify() is a no-op and on_notify_tx
+        // would never fire - which would pin the gate forever. Drop
+        // any pending response without locking the gate.
         if cp.subscribed_count() == 0 {
-            if self.cp_response.lock().unwrap().take().is_some() {
+            if gate.drop_pending() {
                 log::debug!("CP response dropped: no subscribers");
             }
             return;
         }
-        let Some(bytes) = self.cp_response.lock().unwrap().take() else {
-            return;
-        };
-        self.cp_indicate_idle.store(false, Ordering::Release);
-        *self.cp_indicate_sent_at.lock().unwrap() = Some(Instant::now());
-        cp.set_value(&bytes).notify();
+
+        let now_ms = self.cp_gate_epoch.elapsed().as_millis() as u64;
+        let result = gate.poll(now_ms);
+        if result.timed_out {
+            log::warn!(
+                "CP indication unconfirmed after {:?}; releasing gate",
+                CP_INDICATE_CONFIRM_TIMEOUT
+            );
+        }
+        if let Some(bytes) = result.send {
+            cp.set_value(&bytes).notify();
+        }
     }
 
     /// Push a fresh Indoor Bike Data notification. Called once per poll
