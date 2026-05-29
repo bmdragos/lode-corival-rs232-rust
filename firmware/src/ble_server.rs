@@ -48,11 +48,18 @@ const FTMS_STATUS_UUID: BleUuid = BleUuid::from_uuid16(0x2ADA);
 ///   [4..8]  uint32 LE - Target Setting Features bitmap
 ///
 /// Bits we set:
-///   - Fitness Machine Features bit 2  (0x04): Cadence Supported
+///   - Fitness Machine Features bit 1  (0x02): Cadence Supported
 ///   - Fitness Machine Features bit 14 (0x4000): Power Measurement Supported
 ///   - Target Setting Features  bit 3  (0x08): Power Target Setting Supported
+///
+/// NOTE: the Fitness Machine Features bitmap here is DISTINCT from the
+/// Indoor Bike Data (0x2AD2) Flags bitmap used in `ftms_encoder`. In the
+/// Feature bitmap, bit 1 = Cadence Supported and bit 2 = Total Distance
+/// Supported; in the IBD Flags bitmap, bit 2 = Instantaneous Cadence. Do
+/// not copy bit positions between the two — that mix-up previously set
+/// bit 2 here, advertising Total Distance instead of Cadence.
 const FEATURE_BYTES: [u8; 8] = [
-    0x04, 0x40, 0x00, 0x00, // cadence + power measurement
+    0x02, 0x40, 0x00, 0x00, // cadence + power measurement
     0x08, 0x00, 0x00, 0x00, // power target setting
 ];
 
